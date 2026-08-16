@@ -4,7 +4,8 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
 
 
@@ -24,6 +25,7 @@ class Listing:
     lon: Optional[float] = None
     walk_minutes: Optional[float] = None  # filled by geo pipeline
     walk_estimated: bool = False          # True when no router could be reached
+    published: Optional[datetime] = None  # portal's publication date, when given
 
     @property
     def uid(self) -> str:

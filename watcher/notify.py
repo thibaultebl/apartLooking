@@ -97,6 +97,20 @@ def send_match_alert(listing) -> None:
     send(text, silent=False)
 
 
+# A digest must stay readable on a phone. Matches are the point of the whole
+# thing so they get a generous allowance; the rest is sampled per source.
+MAX_MATCHES = 40
+MAX_PER_SOURCE = 8
+
+
+def _section(title: str, items: list, limit: int) -> str:
+    shown = items[:limit]
+    lines = [_fmt_listing(r) for r in shown]
+    if len(items) > limit:
+        lines.append(f"   <i>… et {len(items) - limit} autre(s)</i>")
+    return f"{title}\n" + "\n".join(lines)
+
+
 def send_recap(rows, failed_sources: list[str] | None = None) -> None:
     """Daily digest of all new listings; matches pinned on top, silent send."""
     if not rows:
@@ -106,19 +120,17 @@ def send_recap(rows, failed_sources: list[str] | None = None) -> None:
         others = [r for r in rows if not r["is_match"]]
         sections = []
         if matches:
-            sections.append(
-                "🚨 <b>Matches (≤ 20 min à pied de la gare)</b>\n"
-                + "\n".join(_fmt_listing(r) for r in matches)
-            )
+            sections.append(_section(
+                f"🚨 <b>Matches (≤ 20 min à pied de la gare)</b> — {len(matches)}",
+                matches, MAX_MATCHES))
         if others:
             by_source: dict[str, list] = {}
             for r in others:
                 by_source.setdefault(r["source"], []).append(r)
             for source, items in sorted(by_source.items()):
-                sections.append(
-                    f"<b>{html.escape(source)}</b> ({len(items)})\n"
-                    + "\n".join(_fmt_listing(r) for r in items)
-                )
+                sections.append(_section(
+                    f"<b>{html.escape(source)}</b> ({len(items)})",
+                    items, MAX_PER_SOURCE))
         body = "\n\n".join(sections)
 
     header = f"🏠 <b>Récap immo Lausanne</b> — {len(rows)} nouvelle(s) annonce(s)\n\n"

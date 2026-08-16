@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime
 from typing import Iterator
 
 from bs4 import BeautifulSoup
@@ -24,9 +25,8 @@ def fetch(seen: set[str] = frozenset()) -> Iterator[Listing]:
     emitted: set[str] = set()
     for page in range(1, MAX_PAGES + 1):
         try:
-            resp = get(sess, f"{BASE}/r/{RUBRIQUE}/", params={"p": page})
-            resp.encoding = "windows-1252"
-            html = resp.text
+            # The server declares utf-8 correctly; do not override it.
+            html = get(sess, f"{BASE}/r/{RUBRIQUE}/", params={"p": page}).text
         except Exception as e:
             log.warning("petitesannonces p%d failed: %s", page, e)
             break
@@ -70,8 +70,26 @@ def _parse_page(html: str) -> list[Listing]:
             address=street,
             zip_code=zip_code,
             city=city,
+            published=_parse_date(_text(row.select_one(".elss"))),
         ))
     return out
+
+
+def _parse_date(value: str):
+    """Dates come as "11.08" with no year; assume the most recent such date."""
+    m = re.fullmatch(r"(\d{2})\.(\d{2})", value.strip())
+    if not m:
+        return None
+    day, month = int(m.group(1)), int(m.group(2))
+    today = datetime.now()
+    for year in (today.year, today.year - 1):
+        try:
+            dt = datetime(year, month, day)
+        except ValueError:
+            return None
+        if dt <= today:
+            return dt
+    return None
 
 
 def _text(el) -> str:

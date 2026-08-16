@@ -21,6 +21,10 @@ NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 OSRM_URL = ("https://routing.openstreetmap.de/routed-foot/route/v1/foot/"
             "{lon1},{lat1};{lon2},{lat2}")
 VALHALLA_URL = "https://valhalla1.openstreetmap.de/route"
+VALHALLA_MATRIX_URL = "https://valhalla1.openstreetmap.de/sources_to_targets"
+# One matrix request answers many origins against the single station target,
+# which is ~250x faster than routing each listing separately.
+MATRIX_BATCH = 100
 USER_AGENT = "lausanne-rental-watcher/1.0 (personal apartment search)"
 
 # Walking assumptions for the last-resort estimate.
@@ -122,7 +126,10 @@ def walk_minutes_to(conn, lat: float, lon: float, station_lat: float,
     would silently fail the criterion and cost the user a flat, which is a far
     worse outcome than an occasional imprecise alert.
     """
-    key = f"{lat:.5f},{lon:.5f}"
+    # ~100 m grid (3 decimals ≈ 111 m lat, 77 m lon at this latitude). Keying on
+    # exact coordinates made the cache nearly useless: neighbouring flats, and
+    # every flat in the same building, each cost a routing call.
+    key = f"{lat:.3f},{lon:.3f}"
     cached = db.cached_walk(conn, key)
     if cached is not None:
         return cached, False
@@ -144,31 +151,93 @@ def walk_minutes_to(conn, lat: float, lon: float, station_lat: float,
     return estimate, True  # deliberately not cached: retry properly next run
 
 
-def resolve_listing(conn, l: Listing, config: dict) -> None:
-    """Fill l.lat/lon (if missing) and l.walk_minutes. Best-effort."""
+def resolve_coords(conn, l: Listing) -> None:
+    """Fill l.lat/lon from the address when the portal did not supply them."""
+    if l.lat is not None and l.lon is not None:
+        return
+    query = l.location_str
+    if not query:
+        return
+    coords = geocode(conn, query)
+    if coords is not None:
+        l.lat, l.lon = coords
+
+
+def resolve_walk_times(conn, listings: list[Listing], config: dict) -> None:
+    """Fill walk_minutes for a batch of listings, using one matrix request.
+
+    Anything past the straight-line cutoff is settled arithmetically, so only
+    plausible candidates consume routing capacity.
+    """
     station = config["station"]
     cutoff_km = config.get("haversine_cutoff_km", 2.2)
 
-    if l.lat is None or l.lon is None:
-        query = l.location_str
-        if not query:
-            return
-        coords = geocode(conn, query)
-        if coords is None:
-            return
-        l.lat, l.lon = coords
-
-    dist = haversine_km(l.lat, l.lon, station["lat"], station["lon"])
-    if dist > cutoff_km:
-        # Too far to ever be a 20-min walk: estimate instead of routing.
-        l.walk_minutes = round(dist * DETOUR_FACTOR / WALK_KMH * 60, 1)
-        l.walk_estimated = True
+    candidates = []
+    for l in listings:
+        if l.lat is None or l.lon is None:
+            continue
+        dist = haversine_km(l.lat, l.lon, station["lat"], station["lon"])
+        if dist > cutoff_km:
+            l.walk_minutes = round(dist * DETOUR_FACTOR / WALK_KMH * 60, 1)
+            l.walk_estimated = True
+        else:
+            candidates.append(l)
+    if not candidates:
         return
-    minutes, estimated = walk_minutes_to(
-        conn, l.lat, l.lon, station["lat"], station["lon"])
-    if minutes is not None:
-        l.walk_minutes = round(minutes, 1)
-        l.walk_estimated = estimated
+
+    # Serve what the cache already knows, route only the rest.
+    pending = []
+    for l in candidates:
+        cached = db.cached_walk(conn, _walk_key(l.lat, l.lon))
+        if cached is not None:
+            l.walk_minutes, l.walk_estimated = round(cached, 1), False
+        else:
+            pending.append(l)
+
+    for i in range(0, len(pending), MATRIX_BATCH):
+        chunk = pending[i:i + MATRIX_BATCH]
+        times = _matrix_walk(chunk, station)
+        for l, minutes in zip(chunk, times):
+            if minutes is not None:
+                l.walk_minutes, l.walk_estimated = round(minutes, 1), False
+                db.store_walk(conn, _walk_key(l.lat, l.lon), minutes)
+            else:
+                # Matrix unavailable: fall back to the per-point chain so a
+                # routing outage never silently drops a listing.
+                mins, est = walk_minutes_to(
+                    conn, l.lat, l.lon, station["lat"], station["lon"])
+                if mins is not None:
+                    l.walk_minutes, l.walk_estimated = round(mins, 1), est
+
+
+def _walk_key(lat: float, lon: float) -> str:
+    return f"{lat:.3f},{lon:.3f}"
+
+
+def _matrix_walk(chunk: list[Listing], station: dict) -> list[Optional[float]]:
+    """Walking minutes for many origins to the station, in one request."""
+    try:
+        _throttle()
+        resp = requests.post(
+            VALHALLA_MATRIX_URL,
+            json={"sources": [{"lat": l.lat, "lon": l.lon} for l in chunk],
+                  "targets": [{"lat": station["lat"], "lon": station["lon"]}],
+                  "costing": "pedestrian", "units": "kilometers"},
+            headers={"User-Agent": USER_AGENT},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        rows = resp.json()["sources_to_targets"]
+    except Exception as e:
+        log.warning("matrix request failed for %d origins: %s", len(chunk), e)
+        return [None] * len(chunk)
+
+    out: list[Optional[float]] = []
+    for row in rows:
+        cell = row[0] if isinstance(row, list) else row
+        t = (cell or {}).get("time")
+        out.append(t / 60.0 if t is not None else None)
+    return out + [None] * (len(chunk) - len(out))
 
 
 # When the walk time is only an estimate, accept this much overshoot before

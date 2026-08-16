@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import datetime
 from typing import Iterator
 
 from bs4 import BeautifulSoup
@@ -106,9 +107,20 @@ def _type_of(url: str) -> str:
     return parts[-3].lower() if len(parts) >= 3 else ""
 
 
+def _parse_dt(value):
+    """acheter-louer stamps dates as "2026-03-01 13:55:03.0"."""
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value.split(".")[0].strip(), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
 def _detail(sess, sid: str, url: str) -> Listing | None:
     html = get(sess, url).text
     about = None
+    posted = None
     for m in re.finditer(r'<script type="application/ld\+json">(.*?)</script>',
                          html, re.S):
         try:
@@ -117,6 +129,7 @@ def _detail(sess, sid: str, url: str) -> Listing | None:
             continue
         if data.get("@type") == "RealEstateListing" and data.get("about"):
             about = data["about"][0]
+            posted = _parse_dt(data.get("datePosted"))
             break
     if not about:
         return None
@@ -143,6 +156,7 @@ def _detail(sess, sid: str, url: str) -> Listing | None:
         address=addr.get("streetAddress") or "",
         zip_code=str(addr.get("postalCode") or ""),
         city=addr.get("addressLocality") or "",
+        published=posted,
     )
 
 

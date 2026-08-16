@@ -39,6 +39,27 @@ pedestrian-profile OSRM server for the real walking duration to the station.
 Criteria live in `config.yaml`; `max_price` and `min_rooms` are already wired up
 and just need uncommenting.
 
+## Why "new to us" is not "newly posted"
+
+immobilier.ch paginates non-deterministically: two consecutive full passes
+return ~930 listings each but only ~615 in common, so every run "discovers"
+hundreds of listings that have been on the market for months. Treating those as
+new would have meant ~80 spurious pushes per run.
+
+Two safeguards, in order:
+
+1. **Publication dates.** flatfox, acheter-louer and petitesannonces all expose
+   one, so a listing only earns a push if it was posted within
+   `max_listing_age_days`. (immobilier.ch exposes none — its "New" badge sits on
+   83 % of cards, so it is worthless as a signal.)
+2. **A per-source alert cap.** Whatever happens upstream, one source can never
+   send more than `max_alerts_per_source_run` pushes in a run. Anything beyond
+   the cap is logged and still appears in the recap — bounded, never lost.
+
+The first scan is silent, and stays silent until a **complete** pass finishes:
+a run killed by a timeout leaves the seed flag unset, so the next run does not
+mistake the un-scraped remainder for fresh listings.
+
 ## Setup
 
 1. **Telegram bot** — message [@BotFather](https://t.me/BotFather), `/newbot`, copy the token.

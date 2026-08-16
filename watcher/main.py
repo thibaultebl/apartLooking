@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import logging
 import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import yaml
-from pathlib import Path
 
 from . import db, geo, notify
 from .models import Listing
@@ -22,10 +23,31 @@ log = logging.getLogger("watcher")
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.yaml"
 
+# Listings are resolved and written in batches: big enough for one matrix
+# request to do the routing work, small enough that a crash loses little.
+BATCH_SIZE = 100
+
 
 def load_config() -> dict:
     with open(CONFIG_PATH) as f:
         return yaml.safe_load(f)
+
+
+def _is_recent(listing, max_age_days: int) -> bool:
+    """Whether a listing is new enough to deserve an instant push.
+
+    Portals paginate non-deterministically, so "first time we saw it" is not
+    the same as "newly posted" — immobilier.ch alone re-shuffles roughly a
+    third of its results between runs. Where the portal publishes a date we
+    trust it; where it does not, the per-run alert cap is the backstop.
+    """
+    if listing.published is None:
+        return True
+    published = listing.published
+    if published.tzinfo is None:
+        published = published.replace(tzinfo=timezone.utc)
+    age = datetime.now(timezone.utc) - published
+    return age <= timedelta(days=max_age_days)
 
 
 def scan() -> None:
@@ -34,6 +56,10 @@ def scan() -> None:
     seed_mode = not db.is_seeded(conn)
     if seed_mode:
         log.info("Not yet seeded: this pass stays silent (no notifications).")
+
+    alerting = config.get("alerting", {})
+    max_age_days = alerting.get("max_listing_age_days", 3)
+    max_alerts = alerting.get("max_alerts_per_source_run", 15)
 
     failed: list[str] = []
     total_new = 0
@@ -47,28 +73,60 @@ def scan() -> None:
         # Scrapers stream their results so that everything fetched before an
         # interruption (job timeout, network drop) is already persisted.
         source_new = 0
+        alerts_sent = 0
+        suppressed = 0
+        batch: list = []
+
+        def flush() -> int:
+            """Resolve, persist and alert on one batch. Returns how many."""
+            nonlocal alerts_sent, suppressed
+            if not batch:
+                return 0
+            geo.resolve_walk_times(conn, batch, config)
+            for listing in batch:
+                cross_dupe = db.has_fingerprint(conn, listing.fingerprint)
+                is_match = geo.matches_criteria(listing, config)
+                db.insert(conn, listing, is_match)
+                if not (is_match and not seed_mode and not cross_dupe):
+                    continue
+                if not _is_recent(listing, max_age_days):
+                    continue           # old listing we simply had not indexed
+                if alerts_sent >= max_alerts:
+                    suppressed += 1    # backfill flood — bounded, see recap
+                    continue
+                try:
+                    notify.send_match_alert(listing)
+                    alerts_sent += 1
+                except Exception:
+                    log.exception("Match alert failed for %s", listing.uid)
+            n = len(batch)
+            batch.clear()
+            return n
+
         try:
             for l in fetch(seen_ids):
                 if l.source_id in seen_ids:
                     continue
                 seen_ids.add(l.source_id)
-                cross_dupe = db.has_fingerprint(conn, l.fingerprint)
-                geo.resolve_listing(conn, l, config)
-                is_match = geo.matches_criteria(l, config)
-                db.insert(conn, l, is_match)
-                source_new += 1
-                total_new += 1
-                if is_match and not seed_mode and not cross_dupe:
-                    try:
-                        notify.send_match_alert(l)
-                    except Exception:
-                        log.exception("Match alert failed for %s", l.uid)
+                geo.resolve_coords(conn, l)
+                batch.append(l)
+                if len(batch) >= BATCH_SIZE:
+                    source_new += flush()
+            source_new += flush()
         except Exception:
             log.exception("Source %s failed after %d new listings.",
                           source, source_new)
+            source_new += flush()   # keep what this source did produce
             failed.append(source)
+            total_new += source_new
             continue
-        log.info("%s: %d new listings", source, source_new)
+        total_new += source_new
+        if suppressed:
+            log.warning("%s: %d matching listings beyond the %d-alert cap were "
+                        "not pushed (they are still in the recap)",
+                        source, suppressed, max_alerts)
+        log.info("%s: %d new listings, %d alerts sent", source, source_new,
+                 alerts_sent)
 
     # Reaching here means a full pass finished, so later runs may alert. A run
     # killed mid-pass never gets here and stays in seed mode next time.

@@ -13,6 +13,14 @@ push_criteria:
   # max_price: 2500
   # min_rooms: 2.5
 
+alerting:
+  # Portals publish a date for most listings; anything older than this was
+  # simply not indexed yet rather than newly posted, so it must not buzz.
+  max_listing_age_days: 3
+  # Backstop for sources that publish no date (immobilier.ch): however badly a
+  # source churns, one run can never send more than this many pushes.
+  max_alerts_per_source_run: 15
+
 # Straight-line prefilter: beyond this distance (km) from the station we
 # don't even call the routing API (20 min walk can never reach it).
 haversine_cutoff_km: 2.2

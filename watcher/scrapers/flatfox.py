@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Iterator
 
 from ..models import Listing
@@ -77,7 +78,17 @@ def fetch(seen: set[str] = frozenset()) -> Iterator[Listing]:
             city=d.get("city") or "",
             lat=d.get("latitude"),
             lon=d.get("longitude"),
+            published=_parse_dt(d.get("published") or d.get("created")),
         )
+
+
+def _parse_dt(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 if __name__ == "__main__":
