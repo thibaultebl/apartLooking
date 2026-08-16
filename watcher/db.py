@@ -4,7 +4,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
 
 from .models import Listing
 
@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS geocode_cache (
 );
 
 CREATE TABLE IF NOT EXISTS walk_cache (
-    key          TEXT PRIMARY KEY,   -- "lat,lon" rounded to 5 decimals
+    key          TEXT PRIMARY KEY,   -- "lat,lon" on a ~100 m grid (3 decimals)
     walk_minutes REAL
 );
 """
@@ -70,10 +70,6 @@ def _migrate(conn: sqlite3.Connection) -> None:
         if column not in existing:
             conn.execute(f"ALTER TABLE listings ADD COLUMN {column} {ddl}")
     conn.commit()
-
-
-def is_empty(conn: sqlite3.Connection) -> bool:
-    return conn.execute("SELECT COUNT(*) FROM listings").fetchone()[0] == 0
 
 
 def get_meta(conn: sqlite3.Connection, key: str) -> Optional[str]:

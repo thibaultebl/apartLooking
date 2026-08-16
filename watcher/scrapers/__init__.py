@@ -1,4 +1,8 @@
-"""Scraper registry: one module per source, each exposing fetch() -> list[Listing]."""
+"""Scraper registry: one module per source.
+
+Each exposes `fetch(seen: set[str]) -> Iterator[Listing]` and streams its
+results, so listings are persisted as they arrive rather than only at the end.
+"""
 from __future__ import annotations
 
 import importlib
