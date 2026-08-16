@@ -3,12 +3,15 @@
 Commands:
     scan         scrape all sources, store new listings, push matches
     recap        send the daily Telegram digest of the last 24 h
+    preview      print what would be sent, without sending (add hours, e.g. 24)
     get-chat-id  print chat ids seen by the bot (setup helper)
     test-alert   send a fake match alert to verify Telegram wiring
 """
 from __future__ import annotations
 
+import html
 import logging
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -153,6 +156,42 @@ def recap() -> None:
     log.info("Recap sent: %d listings (%d after dedup).", len(rows), len(unique))
 
 
+def preview() -> None:
+    """Render what would be sent to Telegram, to the terminal. Sends nothing.
+
+    Usage: `python -m watcher.main preview [hours]` (default 24).
+    """
+    hours = float(sys.argv[2]) if len(sys.argv) > 2 else 24.0
+    conn = db.connect()
+
+    captured: list[tuple[bool, str]] = []
+    original_send = notify.send
+    notify.send = lambda text, silent=False: captured.append((silent, text))
+    try:
+        rows = db.published_since(conn, hours)
+        notify.send_recap(rows)
+        for row in [r for r in rows if r["is_match"]][:3]:
+            notify.send_match_alert(row)
+    finally:
+        notify.send = original_send
+
+    print(f"\nListings published in the last {hours:g} h: {len(rows)}"
+          f" ({sum(1 for r in rows if r['is_match'])} matching)\n")
+    for i, (silent, text) in enumerate(captured):
+        kind = "DAILY RECAP (silent)" if i == 0 else "PUSH ALERT (buzzes phone)"
+        print(f"┌─ {kind} " + "─" * max(0, 56 - len(kind)))
+        for line in _to_terminal(text).split("\n"):
+            print(f"│ {line}")
+        print("└" + "─" * 62 + "\n")
+
+
+def _to_terminal(text: str) -> str:
+    """Flatten Telegram HTML into something readable in a terminal."""
+    text = re.sub(r'<a href="([^"]+)">(.*?)</a>', r"\2\n     → \1", text)
+    text = re.sub(r"</?[bi]>", "", text)
+    return html.unescape(text)
+
+
 def test_alert() -> None:
     fake = Listing(
         source="test", source_id="0", url="https://example.com/annonce-test",
@@ -174,6 +213,7 @@ def main() -> None:
     commands = {
         "scan": scan,
         "recap": recap,
+        "preview": preview,
         "get-chat-id": notify.get_chat_id,
         "test-alert": test_alert,
     }

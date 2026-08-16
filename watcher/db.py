@@ -121,6 +121,20 @@ def insert(conn: sqlite3.Connection, l: Listing, is_match: bool) -> None:
     conn.commit()
 
 
+def published_since(conn: sqlite3.Connection, hours: float = 24.0) -> list[sqlite3.Row]:
+    """Listings the portal published within the window.
+
+    Used by `preview` to show a representative day: `new_since` keys on when we
+    first indexed a listing, which during a seed means everything at once.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    return conn.execute(
+        "SELECT * FROM listings WHERE published >= ? "
+        "ORDER BY is_match DESC, source, price",
+        (cutoff[:19],),
+    ).fetchall()
+
+
 def new_since(conn: sqlite3.Connection, hours: float = 24.0) -> list[sqlite3.Row]:
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
     return conn.execute(
