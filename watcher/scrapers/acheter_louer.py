@@ -107,6 +107,16 @@ def _type_of(url: str) -> str:
     return parts[-3].lower() if len(parts) >= 3 else ""
 
 
+def published_for(sess, listing):
+    """Publication date via the same detail page the scraper already parses."""
+    try:
+        parsed = _detail(sess, listing.source_id, listing.url)
+    except Exception as e:
+        log.warning("acheter-louer date fetch failed for %s: %s", listing.source_id, e)
+        return None
+    return parsed.published if parsed else None
+
+
 def _parse_dt(value):
     """acheter-louer stamps dates as "2026-03-01 13:55:03.0"."""
     if not value:

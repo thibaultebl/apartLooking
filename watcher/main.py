@@ -4,12 +4,14 @@ Commands:
     scan         scrape all sources, store new listings, push matches
     recap        send the daily Telegram digest of the last 24 h
     preview      print what would be sent, without sending (add hours, e.g. 24)
+    backfill-dates  fetch publication dates for rows stored without one
     get-chat-id  print chat ids seen by the bot (setup helper)
     test-alert   send a fake match alert to verify Telegram wiring
 """
 from __future__ import annotations
 
 import html
+import importlib
 import logging
 import re
 import sys
@@ -21,6 +23,7 @@ import yaml
 from . import db, geo, notify
 from .models import Listing
 from .scrapers import get_scraper
+from .scrapers.base import session as base_session
 
 log = logging.getLogger("watcher")
 
@@ -78,6 +81,7 @@ def scan() -> None:
         source_new = 0
         alerts_sent = 0
         suppressed = 0
+        out_of_region = 0
         batch: list = []
 
         def flush() -> int:
@@ -112,6 +116,9 @@ def scan() -> None:
                     continue
                 seen_ids.add(l.source_id)
                 geo.resolve_coords(conn, l)
+                if geo.out_of_region(l, config):
+                    out_of_region += 1
+                    continue
                 batch.append(l)
                 if len(batch) >= BATCH_SIZE:
                     source_new += flush()
@@ -128,8 +135,9 @@ def scan() -> None:
             log.warning("%s: %d matching listings beyond the %d-alert cap were "
                         "not pushed (they are still in the recap)",
                         source, suppressed, max_alerts)
-        log.info("%s: %d new listings, %d alerts sent", source, source_new,
-                 alerts_sent)
+        log.info("%s: %d new listings, %d alerts sent%s", source, source_new,
+                 alerts_sent,
+                 f", {out_of_region} outside the region" if out_of_region else "")
 
     # Reaching here means a full pass finished, so later runs may alert. A run
     # killed mid-pass never gets here and stays in seed mode next time.
@@ -154,6 +162,46 @@ def recap() -> None:
         unique.append(r)
     notify.send_recap(unique)
     log.info("Recap sent: %d listings (%d after dedup).", len(rows), len(unique))
+
+
+def backfill_dates() -> None:
+    """Fetch publication dates for rows stored before dates were extracted.
+
+    Usage: `python -m watcher.main backfill-dates [per_source]` (default 300).
+
+    Works newest-id-first: portal ids are sequential, so the recent listings —
+    the only ones a digest window can contain — are reached first, and the run
+    can be stopped at any point without losing what it already wrote.
+    """
+    per_source = int(sys.argv[2]) if len(sys.argv) > 2 else 300
+    conn = db.connect()
+    sess = base_session()
+
+    for source in load_config()["sources"]:
+        module = importlib.import_module(f".scrapers.{source}", package=__package__)
+        if not hasattr(module, "published_for"):
+            continue
+        rows = conn.execute(
+            """SELECT uid, source_id, url FROM listings
+               WHERE source = ? AND published IS NULL
+               ORDER BY CAST(source_id AS INTEGER) DESC LIMIT ?""",
+            (source, per_source),
+        ).fetchall()
+        if not rows:
+            log.info("%s: nothing to backfill", source)
+            continue
+
+        filled = 0
+        for row in rows:
+            stub = Listing(source=source, source_id=row["source_id"], url=row["url"])
+            published = module.published_for(sess, stub)
+            if published is None:
+                continue
+            conn.execute("UPDATE listings SET published = ? WHERE uid = ?",
+                         (published.isoformat(), row["uid"]))
+            conn.commit()
+            filled += 1
+        log.info("%s: dated %d of %d rows", source, filled, len(rows))
 
 
 def preview() -> None:
@@ -214,6 +262,7 @@ def main() -> None:
         "scan": scan,
         "recap": recap,
         "preview": preview,
+        "backfill-dates": backfill_dates,
         "get-chat-id": notify.get_chat_id,
         "test-alert": test_alert,
     }

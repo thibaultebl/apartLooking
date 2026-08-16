@@ -82,6 +82,16 @@ def fetch(seen: set[str] = frozenset()) -> Iterator[Listing]:
         )
 
 
+def published_for(sess, listing):
+    """Publication date from the public listing endpoint."""
+    try:
+        d = get(sess, f"{BASE}/api/v1/public-listing/{listing.source_id}/").json()
+    except Exception as e:
+        log.warning("flatfox date fetch failed for %s: %s", listing.source_id, e)
+        return None
+    return _parse_dt(d.get("published") or d.get("created"))
+
+
 def _parse_dt(value):
     if not value:
         return None

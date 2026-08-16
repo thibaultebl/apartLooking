@@ -75,6 +75,11 @@ def _parse_page(html: str) -> list[Listing]:
     return out
 
 
+def published_for(sess, listing):
+    """Dates already arrive with the search rows; nothing extra to fetch."""
+    return None
+
+
 def _parse_date(value: str):
     """Dates come as "11.08" with no year; assume the most recent such date."""
     m = re.fullmatch(r"(\d{2})\.(\d{2})", value.strip())

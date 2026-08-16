@@ -25,6 +25,12 @@ alerting:
 # don't even call the routing API (20 min walk can never reach it).
 haversine_cutoff_km: 2.2
 
+# Hard region boundary. Anything further from the station than this is not part
+# of the search and is discarded at ingest — a portal that silently widens a
+# search (immobilier.ch does this for unknown commune slugs) cannot pollute the
+# database. Generous enough to cover the whole agglomeration.
+max_distance_km: 12
+
 # Sources to scan. Comment out a line to disable a scraper.
 sources:
   - flatfox          # SMG network; ~54% of its listings carry an smg_id

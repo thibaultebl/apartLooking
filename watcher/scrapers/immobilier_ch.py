@@ -1,8 +1,10 @@
 """immobilier.ch — server-rendered HTML cards (incl. lat/lng), paginated."""
 from __future__ import annotations
 
+import json
 import logging
 import re
+from datetime import datetime
 from typing import Iterator
 
 from bs4 import BeautifulSoup
@@ -15,10 +17,14 @@ log = logging.getLogger(__name__)
 SOURCE = "immobilier_ch"
 BASE = "https://www.immobilier.ch"
 # (property type, commune slug) combinations to scan
+# Only slugs this portal actually recognises. An unknown slug does NOT 404 —
+# it silently falls back to canton-wide results, which is how listings in
+# Avenches and the Vallée de Joux once ended up in a Lausanne search. Verify
+# any addition returns on-target cities before adding it here.
 SEARCHES = [
     ("appartement", c) for c in
     ["lausanne", "renens-vd", "prilly", "pully", "ecublens-vd",
-     "chavannes-pres-renens", "crissier", "epalinges", "le-mont-sur-lausanne"]
+     "chavannes-pres-renens", "crissier", "epalinges"]
 ] + [("maison", "lausanne")]
 MAX_PAGES = 30
 
@@ -77,6 +83,28 @@ def _parse_page(html: str) -> list[Listing]:
             lon=lon,
         ))
     return out
+
+
+def published_for(sess, listing) -> "datetime | None":
+    """Publication date, which this portal only exposes on the detail page."""
+    try:
+        html = get(sess, listing.url).text
+    except Exception as e:
+        log.warning("immobilier.ch date fetch failed for %s: %s", listing.source_id, e)
+        return None
+    for m in re.finditer(r'<script type="application/ld\+json">(.*?)</script>',
+                         html, re.S):
+        try:
+            data = json.loads(m.group(1))
+        except json.JSONDecodeError:
+            continue
+        raw = data.get("datePosted")
+        if raw:
+            try:
+                return datetime.fromisoformat(raw[:19])
+            except ValueError:
+                return None
+    return None
 
 
 def _text(el) -> str:

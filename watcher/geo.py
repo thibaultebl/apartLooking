@@ -163,6 +163,22 @@ def resolve_coords(conn, l: Listing) -> None:
         l.lat, l.lon = coords
 
 
+def out_of_region(l: Listing, config: dict) -> bool:
+    """Whether a listing falls outside the searched region.
+
+    Portals do not always honour a location filter — immobilier.ch answers an
+    unknown commune slug with canton-wide results rather than an error — so the
+    region is enforced here instead of trusted from the search URL. Listings
+    with no coordinates are kept: they cannot match anyway, and dropping them
+    would hide addresses the agency simply withheld.
+    """
+    limit = config.get("max_distance_km")
+    if limit is None or l.lat is None or l.lon is None:
+        return False
+    station = config["station"]
+    return haversine_km(l.lat, l.lon, station["lat"], station["lon"]) > limit
+
+
 def resolve_walk_times(conn, listings: list[Listing], config: dict) -> None:
     """Fill walk_minutes for a batch of listings, using one matrix request.
 
