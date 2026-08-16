@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+
+# Local state only — in CI this lives on the `state` branch (scripts/state.sh)
+data/

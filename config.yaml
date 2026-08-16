@@ -1,0 +1,30 @@
+# Lausanne Rental Watcher configuration
+
+# Reference point for the walk-time criterion: Lausanne train station
+station:
+  lat: 46.5170
+  lon: 6.6291
+
+# Criteria that trigger an immediate (loud) Telegram push.
+# All listed criteria must match.
+push_criteria:
+  max_walk_minutes: 20
+  # Future knobs — uncomment to activate:
+  # max_price: 2500
+  # min_rooms: 2.5
+
+# Straight-line prefilter: beyond this distance (km) from the station we
+# don't even call the routing API (20 min walk can never reach it).
+haversine_cutoff_km: 2.2
+
+# Sources to scan. Comment out a line to disable a scraper.
+sources:
+  - flatfox          # SMG network; ~54% of its listings carry an smg_id
+  - immobilier_ch    # Romandie régies; ships lat/lng in the markup
+  - acheter_louer    # syndicates Homegate inventory
+  - petitesannonces  # private landlords, not on the portals
+
+# Deliberately NOT scraped — all four sit behind DataDome/Cloudflare bot walls
+# that need a real browser on a residential IP, which a CI runner is not:
+#   homegate, immoscout24  -> reached indirectly via acheter_louer + flatfox
+#   anibis, newhome        -> no viable path; accepted coverage gap

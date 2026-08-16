@@ -1,0 +1,42 @@
+name: scan
+
+# Scrapes every 30 minutes during waking hours and pushes an instant Telegram
+# alert for any new listing within 20 minutes' walk of Lausanne station.
+on:
+  schedule:
+    - cron: "*/30 5-21 * * *"   # UTC — roughly 07:00–23:00 CEST
+  workflow_dispatch:
+
+# Never let two scans (or a scan and a state save) race on the state branch.
+concurrency:
+  group: watcher-state
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Restore state
+        run: bash scripts/state.sh restore
+
+      - name: Scan
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python -m watcher.main scan
+
+      - name: Save state
+        if: always()   # keep whatever was scraped even if a source blew up
+        run: bash scripts/state.sh save
