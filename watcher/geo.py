@@ -270,9 +270,20 @@ def matches_criteria(l: Listing, config: dict) -> bool:
         limit = max_walk * ESTIMATE_TOLERANCE if l.walk_estimated else max_walk
         if l.walk_minutes > limit:
             return False
+    # Price/surface bounds only reject when the portal actually published the
+    # figure. Agencies routinely withhold the rent ("prix sur demande"), and
+    # treating a missing number as a failure would silently drop those flats.
     max_price = crit.get("max_price")
-    if max_price is not None and (l.price is None or l.price > max_price):
+    if max_price is not None and l.price is not None and l.price > max_price:
         return False
+    min_price = crit.get("min_price")
+    if min_price is not None and l.price is not None and l.price < min_price:
+        return False
+    min_surface = crit.get("min_surface")
+    if min_surface is not None and l.surface is not None and l.surface < min_surface:
+        return False
+    # Room count is different: it is the filter that separates flats from
+    # single rooms, so an unknown count is not allowed to pass.
     min_rooms = crit.get("min_rooms")
     if min_rooms is not None and (l.rooms is None or l.rooms < min_rooms):
         return False

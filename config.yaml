@@ -9,9 +9,26 @@ station:
 # All listed criteria must match.
 push_criteria:
   max_walk_minutes: 20
-  # Future knobs — uncomment to activate:
-  # max_price: 2500
-  # min_rooms: 2.5
+
+  # Swiss "pièces" counts the living room, so 2 pces ≈ 1 bedroom. This is the
+  # filter that does the real work: it removes every chambre and studio (7-15 m²
+  # rooms in shared flats), which is 156 of 572 matches, and nothing else.
+  min_rooms: 2
+
+  # Deliberately NOT set — measured against real data, both do more harm than good:
+  #
+  #   min_price: a floor at 1000-1200 discards only 3-4 listings, and the very
+  #     first ones it takes are the best deals on the market (973 CHF for
+  #     4.5 pces/100 m², 990 CHF for 3.5 pces/100 m²). Cheap does not mean nasty
+  #     here; nasty was the 1-room listings, already gone via min_rooms.
+  #   min_surface: the smallest genuine 2 pces is 35 m². Everything below that is
+  #     a broken surface field on an otherwise good flat (a 3 pces at 3900 CHF
+  #     listed as "1 m²"), so a floor would reject real flats over bad data.
+  #
+  # Both are implemented and ready if you want them:
+  # min_price: 1000
+  # min_surface: 35
+  # max_price: 2500     # a ceiling is the useful one if budget is the constraint
 
 alerting:
   # Portals publish a date for most listings; anything older than this was
