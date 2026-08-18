@@ -64,8 +64,11 @@ sources:
   - immobilier_ch    # Romandie régies; ships lat/lng in the markup
   - acheter_louer    # syndicates Homegate inventory
   - petitesannonces  # private landlords, not on the portals
+  - comparis         # aggregator; the only source that states the floor outright
 
-# Deliberately NOT scraped — all four sit behind DataDome/Cloudflare bot walls
-# that need a real browser on a residential IP, which a CI runner is not:
-#   homegate, immoscout24  -> reached indirectly via acheter_louer + flatfox
-#   anibis, newhome        -> no viable path; accepted coverage gap
+# Deliberately NOT scraped — all sit behind DataDome/Cloudflare bot walls that
+# need a real browser on a residential IP, which a CI runner is not (re-verified
+# 2026-08-18: every one still answers 403):
+#   homegate, immoscout24  -> reached indirectly via acheter_louer, flatfox and
+#                             comparis, which all resell their inventory
+#   anibis, tutti, newhome -> no viable path; accepted coverage gap

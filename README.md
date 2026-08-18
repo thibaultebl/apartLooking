@@ -17,12 +17,22 @@ per run and cannot drift or hallucinate.
 | `immobilier_ch` | Romandie régies (Bernard Nicod, Marmillod, …) | HTML cards — ships `data-latlng`, no geocoding needed; NPA and floor need `enrich` |
 | `acheter_louer` | syndicates **Homegate** inventory | ld+json `ItemList` for ids, ld+json detail per listing |
 | `petitesannonces` | private landlords, absent from the portals | HTML table rows |
+| `comparis` | aggregator over Homegate/ImmoScout24; **states the floor outright** | Next.js payload on the results page — one request, newest 10 only |
 
-**Not scraped, deliberately.** `homegate`, `immoscout24`, `anibis` and `newhome`
-sit behind DataDome/Cloudflare walls that need a real browser on a residential
-IP — unreachable from a CI runner (verified: their web *and* mobile API endpoints
-all return 403). Homegate and ImmoScout24 inventory still reaches us indirectly
-through `acheter_louer` and `flatfox`; Anibis and newhome are an accepted gap.
+**Not scraped, deliberately.** `homegate`, `immoscout24`, `anibis`/`tutti` and
+`newhome` sit behind DataDome/Cloudflare walls that need a real browser on a
+residential IP — unreachable from a CI runner (re-verified 2026-08-18: all still
+403). Homegate and ImmoScout24 inventory still reaches us indirectly through
+`acheter_louer`, `flatfox` and `comparis`; Anibis/tutti and newhome are an
+accepted gap.
+
+**`comparis` is capped at one request per run**, and that is a property of the
+site, not a choice. Its WAF refuses `?page=N`, every other query parameter, the
+commune and property-type path variants, and the `/details/show/` pages; only a
+bare hit on the results URL returns. The payload is ordered newest-first, so ten
+listings every 30 minutes still comfortably outpaces what Lausanne produces —
+but comparis can never seed history, and reports ~2500 active listings we will
+never page through. It is there for new listings and for the floor.
 
 The four portals overlap heavily — `acheter_louer` ∩ `immobilier_ch` share 72 %
 of their addresses, `flatfox` ∩ `acheter_louer` 53 %. Measured by addresses that
@@ -62,11 +72,14 @@ Neither is uniformly published, so both are pieced together per source:
 | `acheter_louer` | in the ld+json | `<td>Etage</td>` row, else the description — scoped to `div.content`, since the related-listing thumbnails on the same page advertise *other* flats' floors |
 | `immobilier_ch` | **absent from search cards** — fetched from the detail page by `enrich` | URL slug (~19 % of cards, free), else the detail page's `og:title` |
 | `petitesannonces` | in the search row | ad description, fetched by `enrich` |
+| `comparis` | in the payload | stated outright (`3. Etage`, `EG`) — every listing, no extra request |
 
 `enrich` costs one request per listing, so it runs **only for listings that
 already pass every other criterion** (`geo.could_match`) — in practice a
-handful per run, not one per listing. Floor parsing lives in `watcher/floors.py`;
-run `python -m watcher.floors` to check its regexes against real portal strings.
+handful per run, not one per listing. Floor parsing lives in `watcher/floors.py`
+and handles both languages, since comparis labels floors in German (`EG`,
+`Untergeschoss`) even on French listings; run `python -m watcher.floors` to
+check its regexes against real portal strings.
 
 Rows stored before a field was collected keep their gap, and `is_match` is
 written once at insert, so both go stale when the criteria change:
