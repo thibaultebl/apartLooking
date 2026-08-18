@@ -15,11 +15,13 @@ from __future__ import annotations
 import html
 import importlib
 import logging
+import os
 import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import yaml
 
@@ -38,6 +40,10 @@ BATCH_SIZE = 100
 
 # Seconds between requests in a bulk backfill (see backfill_details).
 BACKFILL_INTERVAL = 0.4
+
+# When the daily digest goes out, in Swiss local time.
+RECAP_HOUR_LOCAL = 19
+LOCAL_TZ = ZoneInfo("Europe/Zurich")
 
 
 def load_config() -> dict:
@@ -150,6 +156,10 @@ def scan() -> None:
             total_new += source_new
             continue
         total_new += source_new
+        # Only on the success path: `recap` reads these marks to tell a quiet
+        # market apart from a scraper that has silently stopped working.
+        db.set_meta(conn, f"last_ok:{source}",
+                    datetime.now(timezone.utc).isoformat())
         if suppressed:
             log.warning("%s: %d matching listings beyond the %d-alert cap were "
                         "not pushed (they are still in the recap)",
@@ -167,7 +177,49 @@ def scan() -> None:
              total_new, failed or "none")
 
 
+def _scheduled_for_now() -> bool:
+    """Whether this run is the one that lands on RECAP_HOUR_LOCAL Swiss time.
+
+    GitHub crons are UTC and do not follow DST, so recap.yml registers both
+    candidate hours (17:00 and 18:00 UTC) and exactly one of them is 19:00
+    locally on any given day. The decision keys on which cron fired — passed
+    in as RECAP_CRON, from github.event.schedule — rather than on the clock,
+    because a scheduled run is routinely delayed by several minutes and can
+    land in the following hour, which a wall-clock test would read as "not
+    19:00" and silently drop the digest.
+
+    An empty RECAP_CRON means a manual dispatch (or a local run), which always
+    sends.
+    """
+    cron = os.environ.get("RECAP_CRON", "")
+    if not cron:
+        return True
+    offset_hours = int(datetime.now(LOCAL_TZ).utcoffset().total_seconds() // 3600)
+    return cron.split()[1] == str(RECAP_HOUR_LOCAL - offset_hours)
+
+
+def _stale_sources(conn, config: dict, hours: int = 24) -> list[str]:
+    """Sources that have not completed a scan pass within the window.
+
+    Keyed on last success rather than on the last run's failures, because scan
+    and recap are separate processes: recap cannot see the `failed` list scan
+    built. It also catches a source that has been quietly dead for days rather
+    than only one that broke in the final run before the digest.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    stale = []
+    for source in config["sources"]:
+        last_ok = db.get_meta(conn, f"last_ok:{source}")
+        if last_ok is None or datetime.fromisoformat(last_ok) < cutoff:
+            stale.append(source)
+    return stale
+
+
 def recap() -> None:
+    if not _scheduled_for_now():
+        log.info("Cron %r is not %02d:00 Europe/Zurich today — no digest.",
+                 os.environ.get("RECAP_CRON", ""), RECAP_HOUR_LOCAL)
+        return
     config = load_config()
     conn = db.connect()
     rows = db.new_since(conn, hours=24)
@@ -179,8 +231,10 @@ def recap() -> None:
             continue
         seen_fp.add(r["fingerprint"])
         unique.append(r)
-    notify.send_recap(unique, config=config)
-    log.info("Recap sent: %d listings (%d after dedup).", len(rows), len(unique))
+    stale = _stale_sources(conn, config)
+    notify.send_recap(unique, failed_sources=stale, config=config)
+    log.info("Recap sent: %d listings (%d after dedup). Stale sources: %s",
+             len(rows), len(unique), stale or "none")
 
 
 def backfill_dates() -> None:

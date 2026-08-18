@@ -4,7 +4,7 @@ Scrapes Lausanne-region rental listings on a schedule and sends them to Telegram
 
 - **instant loud push** for every new listing matching the search — currently
   **3.5 pces, in 1006 or 1007, 70–95 m², ≤ 2800 CHF, not on the ground floor**
-- **daily silent digest** of everything new in the last 24 h
+- **daily silent digest** of everything new in the last 24 h, at 19:00 Swiss time
 
 No LLM is involved at runtime — it is plain Python on a cron, so it costs nothing
 per run and cannot drift or hallucinate.
@@ -128,12 +128,36 @@ mistake the un-scraped remainder for fresh listings.
    ```bash
    TELEGRAM_BOT_TOKEN=... python -m watcher.main get-chat-id
    ```
-3. **GitHub repo** → Settings → Secrets and variables → Actions, add
-   `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`.
-4. Push. `scan.yml` runs every 30 min (07:00–23:00 CEST), `recap.yml` daily at 08:00 CEST.
-   Trigger either manually from the Actions tab to verify.
+3. **GitHub repo** — make it **public**. Actions minutes are unlimited on public
+   repos; a private repo gets 2,000 min/month, and scanning every 30 min is
+   ~1,020 runs/month, which does not fit. Nothing secret lives in the repo, and
+   `schedule` / `workflow_dispatch` are the only triggers, so no fork-originated
+   workflow can ever read the secrets.
+4. Settings → Secrets and variables → Actions, add `TELEGRAM_BOT_TOKEN` and
+   `TELEGRAM_CHAT_ID`. Then Settings → Actions → General → Workflow permissions
+   must not be read-only, or `scan.yml` cannot push the `state` branch.
+5. Push. `scan.yml` runs every 30 min (07:00–23:00 CEST); `recap.yml` sends the
+   digest daily at **19:00 Swiss time**. Trigger either manually from the
+   Actions tab to verify — a manual recap always sends, bypassing the hour check.
 
 The first run seeds the database **silently** — no notification flood.
+
+### Why the recap has two crons
+
+GitHub schedules in UTC and does not observe DST, so 19:00 local is 17:00 UTC in
+summer and 18:00 UTC in winter. `recap.yml` registers **both**, and
+`_scheduled_for_now` in `watcher/main.py` lets through only the one that is
+really 19:00 today — keyed on `github.event.schedule` (which cron fired) rather
+than on the clock, since a scheduled run is often delayed into the next hour.
+Collapsing these into a single cron would make the digest drift by an hour twice
+a year; dropping one would silence it for half the year.
+
+### Scheduled workflows get disabled after 60 days
+
+GitHub disables cron workflows in a repo with no activity for 60 days. The
+`state` branch pushes do not count — they are made by `github-actions[bot]`.
+GitHub emails you first, and one click in the Actions tab re-enables it; any
+commit you push yourself resets the clock.
 
 ## Local use
 
@@ -161,6 +185,9 @@ job timeout or a dropped connection never discards the work already done.
 
 ## When a scraper breaks
 
-Portals change markup. A source that starts returning 0 listings is logged and
-reported in the recap footer rather than failing the run — the other sources keep
-working. Run that scraper standalone (above) to see what changed.
+Portals change markup. A source that throws is logged and skipped rather than
+failing the run — the other sources keep working. Every source that completes a
+pass stamps `last_ok:<source>` in the `meta` table, and the daily recap lists any
+source with no success in 24 h under `⚠️ Sources en erreur`, so a scraper that
+has quietly died cannot masquerade as a slow market. Run that scraper standalone
+(above) to see what changed.

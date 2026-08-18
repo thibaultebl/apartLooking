@@ -1,16 +1,29 @@
 name: recap
 
-# Sends the daily digest of everything new in the last 24 h.
-# Read-only with respect to state, so it never contends with `scan`.
+# Sends the daily digest of everything new in the last 24 h, at 19:00 Swiss time.
+#
+# GitHub crons are UTC and do not follow DST, so both candidate hours are
+# registered and the job itself decides which one is really 19:00 today — see
+# `_scheduled_for_now` in watcher/main.py. Do not collapse these into one cron:
+# a single fixed UTC hour drifts by an hour twice a year.
 on:
   schedule:
-    - cron: "0 6 * * *"   # 08:00 CEST / 07:00 CET
+    - cron: "0 17 * * *"   # 19:00 CEST (summer)
+    - cron: "0 18 * * *"   # 19:00 CET  (winter)
   workflow_dispatch:
+
+# Read-only with respect to state, but `state.sh restore` still fetches the
+# branch that `scan` force-pushes over, so share its lock rather than race it.
+concurrency:
+  group: watcher-state
+  cancel-in-progress: false
 
 jobs:
   recap:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -28,4 +41,5 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RECAP_CRON: ${{ github.event.schedule }}   # empty on workflow_dispatch
         run: python -m watcher.main recap
