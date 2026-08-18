@@ -100,12 +100,6 @@ def known_uids(conn: sqlite3.Connection, source: str) -> set[str]:
     return {r["uid"] for r in rows}
 
 
-def has_fingerprint(conn: sqlite3.Connection, fp: str) -> bool:
-    return conn.execute(
-        "SELECT 1 FROM listings WHERE fingerprint = ? LIMIT 1", (fp,)
-    ).fetchone() is not None
-
-
 def insert(conn: sqlite3.Connection, l: Listing, is_match: bool) -> None:
     conn.execute(
         """INSERT OR IGNORE INTO listings
@@ -123,26 +117,45 @@ def insert(conn: sqlite3.Connection, l: Listing, is_match: bool) -> None:
     conn.commit()
 
 
-def published_since(conn: sqlite3.Connection, hours: float = 24.0) -> list[sqlite3.Row]:
-    """Listings the portal published within the window.
+def matches_since(conn: sqlite3.Connection, hours: float) -> list[sqlite3.Row]:
+    """Matching listings the portal published within the window.
 
-    Used by `preview` to show a representative day: `new_since` keys on when we
-    first indexed a listing, which during a seed means everything at once.
+    Keyed on the publication date, not on when we first indexed the listing:
+    portals paginate non-deterministically — immobilier.ch re-shuffles roughly a
+    third of its results between runs — so "new to us" routinely means a flat
+    that has been on the market for months.
+
+    Where the portal states no date at all, `first_seen` stands in. Only matches
+    reach the digest and matches are rare, so the worst case is one
+    already-on-the-market flat in the list, against never reporting a real match
+    from a source that withholds dates. The message labels those "date inconnue".
+
+    Both columns hold ISO-8601 strings, so comparing on a truncated prefix is
+    sound. `published` is portal-supplied and naive where `first_seen` is UTC —
+    a skew of at most 2 h, which can only include a listing slightly early,
+    never drop one.
     """
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()[:19]
     return conn.execute(
-        "SELECT * FROM listings WHERE published >= ? "
-        "ORDER BY is_match DESC, source, price",
-        (cutoff[:19],),
-    ).fetchall()
-
-
-def new_since(conn: sqlite3.Connection, hours: float = 24.0) -> list[sqlite3.Row]:
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-    return conn.execute(
-        "SELECT * FROM listings WHERE first_seen >= ? ORDER BY is_match DESC, source, price",
+        "SELECT * FROM listings WHERE is_match = 1 "
+        "AND COALESCE(published, first_seen) >= ? "
+        "ORDER BY COALESCE(published, first_seen) DESC, price",
         (cutoff,),
     ).fetchall()
+
+
+def count_since(conn: sqlite3.Connection, hours: float) -> int:
+    """Every listing in the window, matching or not.
+
+    The digest says how many were looked at, so that a day with no match reads
+    as "the market was quiet" rather than "the watcher is broken" — the two are
+    indistinguishable from a message that only ever counts matches.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()[:19]
+    return conn.execute(
+        "SELECT COUNT(*) FROM listings "
+        "WHERE COALESCE(published, first_seen) >= ?", (cutoff,),
+    ).fetchone()[0]
 
 
 # --- geocode / walk caches -------------------------------------------------

@@ -5,15 +5,15 @@ station:
   lat: 46.5170
   lon: 6.6291
 
-# Criteria that trigger an immediate (loud) Telegram push.
-# All listed criteria must match.
+# The search. Every listed criterion must match; only listings that pass all of
+# them are ever reported, in the daily digest.
 #
 # Two of these reject a listing whose value is simply unknown, because they are
 # what defines the search rather than a bound on it: zip_codes and rooms. The
 # rest only reject a figure the portal actually published — agencies routinely
 # withhold the rent ("prix sur demande"), and treating that as a failure would
 # silently drop those flats.
-push_criteria:
+criteria:
   # Sous-Gare / Ouchy / Montriond. immobilier.ch publishes no NPA on its search
   # cards, so its listings get one fetched from the detail page before this is
   # applied — see scrapers/immobilier_ch.py:enrich.
@@ -30,27 +30,32 @@ push_criteria:
   max_price: 2800
 
   # Only rejects a *confirmed* rez-de-chaussée. The floor is unknown for a
-  # minority of listings; those still push, flagged "étage inconnu", because a
-  # missed flat costs more than one extra ping.
+  # minority of listings; those still get reported, flagged "étage inconnu",
+  # because a missed flat costs more than one extra line in the digest.
   exclude_ground_floor: true
 
-  # Dropped: the zip codes now define the area, and a walk bound only cut into
-  # 1007 (Malley/Bourdonnette) without excluding anything unwanted. Still
-  # implemented, still computed, still shown in the message — uncomment to
-  # bring it back as a filter.
-  # max_walk_minutes: 20
+  # Pedestrian routing to the station above, not straight-line distance. This
+  # intersects with zip_codes rather than replacing them: it trims the western
+  # edge of 1007 (Malley/Bourdonnette), which is in the right postcode but not
+  # in walking range. A listing whose walk time cannot be determined at all is
+  # rejected — unlike the price/surface bounds, since every address in 1006/1007
+  # resolves, if only to its postcode centroid.
+  max_walk_minutes: 25
 
-alerting:
-  # Portals publish a date for most listings; anything older than this was
-  # simply not indexed yet rather than newly posted, so it must not buzz.
-  max_listing_age_days: 3
-  # Backstop for sources that publish no date (immobilier.ch): however badly a
-  # source churns, one run can never send more than this many pushes.
-  max_alerts_per_source_run: 15
+digest:
+  # One message a day, at 19:00 Swiss time, covering what was published since
+  # the previous one. Two extra hours of overlap on purpose: GitHub crons run
+  # late by minutes and an exact 24 h window would open a hole of exactly that
+  # delay. An overlap costs a repeated line in two consecutive digests; a hole
+  # costs a flat.
+  window_hours: 26
 
-# Straight-line prefilter: beyond this distance (km) from the station we
-# don't even call the routing API (20 min walk can never reach it).
-haversine_cutoff_km: 2.2
+# Straight-line prefilter: beyond this distance (km) from the station we don't
+# even call the routing API. Must stay comfortably above what max_walk_minutes
+# can reach in a straight line (25 min at the routers' ~5.1 km/h ≈ 2.13 km), or
+# a reachable address gets settled by the arithmetic estimate instead of by real
+# routing, and rejected.
+haversine_cutoff_km: 2.4
 
 # Hard region boundary. Anything further from the station than this is not part
 # of the search and is discarded at ingest — a portal that silently widens a

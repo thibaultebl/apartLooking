@@ -152,15 +152,30 @@ def walk_minutes_to(conn, lat: float, lon: float, station_lat: float,
 
 
 def resolve_coords(conn, l: Listing) -> None:
-    """Fill l.lat/lon from the address when the portal did not supply them."""
+    """Fill l.lat/lon from the address when the portal did not supply them.
+
+    Falls back to the postcode centroid when the street itself does not
+    geocode. Nominatim fails on abbreviated or misspelled streets — "Avenue FC
+    de la Harpe" for Frédéric-César — which the classifieds sources are full of,
+    and with a walk-time criterion in force "no coordinates" means the listing
+    is rejected outright. A centroid is a poor position, but it keeps a real
+    flat in the digest and the resulting walk time is flagged as approximate.
+    """
     if l.lat is not None and l.lon is not None:
         return
     query = l.location_str
-    if not query:
+    if query:
+        coords = geocode(conn, query)
+        if coords is not None:
+            l.lat, l.lon = coords
+            return
+    fallback = f"{l.zip_code} {l.city}".strip()
+    if not fallback or fallback == query:
         return
-    coords = geocode(conn, query)
+    coords = geocode(conn, fallback)
     if coords is not None:
         l.lat, l.lon = coords
+        l.coords_approx = True
 
 
 def out_of_region(l: Listing, config: dict) -> bool:
@@ -186,7 +201,7 @@ def resolve_walk_times(conn, listings: list[Listing], config: dict) -> None:
     plausible candidates consume routing capacity.
     """
     station = config["station"]
-    cutoff_km = config.get("haversine_cutoff_km", 2.2)
+    cutoff_km = config.get("haversine_cutoff_km", 2.4)
 
     candidates = []
     for l in listings:
@@ -199,6 +214,7 @@ def resolve_walk_times(conn, listings: list[Listing], config: dict) -> None:
         else:
             candidates.append(l)
     if not candidates:
+        _mark_approximate(listings)
         return
 
     # Serve what the cache already knows, route only the rest.
@@ -224,6 +240,17 @@ def resolve_walk_times(conn, listings: list[Listing], config: dict) -> None:
                     conn, l.lat, l.lon, station["lat"], station["lon"])
                 if mins is not None:
                     l.walk_minutes, l.walk_estimated = round(mins, 1), est
+    # Last, because every branch above writes walk_estimated.
+    _mark_approximate(listings)
+
+
+def _mark_approximate(listings: list[Listing]) -> None:
+    """Routing from a postcode centroid gives an approximate time, not an exact
+    one — and `_passes_bounds` grants approximate times a tolerance the walk
+    bound would otherwise deny a flat whose street simply did not geocode."""
+    for l in listings:
+        if l.coords_approx and l.walk_minutes is not None:
+            l.walk_estimated = True
 
 
 def _walk_key(lat: float, lon: float) -> str:
@@ -262,8 +289,8 @@ ESTIMATE_TOLERANCE = 1.25
 
 
 def matches_criteria(l: Listing, config: dict) -> bool:
-    """Whether a listing earns a loud push. See config.yaml for the criteria."""
-    crit = config.get("push_criteria", {})
+    """Whether a listing belongs in the digest. See config.yaml for the criteria."""
+    crit = config.get("criteria", {})
     if not _passes_bounds(l, crit):
         return False
     # Defining filters, not bounds: an unknown value is not allowed through.
@@ -282,13 +309,20 @@ def matches_criteria(l: Listing, config: dict) -> bool:
 def could_match(l: Listing, config: dict) -> bool:
     """Whether a listing is still a candidate once the unknowns are resolved.
 
-    Same criteria as `matches_criteria`, except that an unknown postal code or
-    floor passes instead of failing. This is the gate that decides whether a
-    listing is worth a detail-page fetch, so only genuine candidates cost a
-    request — everything ruled out on rooms, price or surface is already free.
+    Same criteria as `matches_criteria`, except that an unknown postal code,
+    floor or walk time passes instead of failing. This is the gate that decides
+    whether a listing is worth a detail-page fetch, so only genuine candidates
+    cost a request — everything ruled out on rooms, price or surface is already
+    free.
+
+    The walk time has to be allowed through unknown: it is derived from
+    coordinates, which are derived from the address — and the address is exactly
+    what the fetch this gate guards goes and gets on immobilier.ch. Rejecting
+    here would make those listings permanently invisible.
     """
-    crit = config.get("push_criteria", {})
-    if not _passes_bounds(l, crit) or not _passes_rooms(l, crit):
+    crit = config.get("criteria", {})
+    if not _passes_bounds(l, crit, allow_unknown_walk=True) \
+            or not _passes_rooms(l, crit):
         return False
     zip_codes = crit.get("zip_codes")
     if (zip_codes is not None and l.zip_code
@@ -299,15 +333,24 @@ def could_match(l: Listing, config: dict) -> bool:
     return True
 
 
-def _passes_bounds(l: Listing, crit: dict) -> bool:
-    """Criteria that only reject a figure the portal actually published."""
+def _passes_bounds(l: Listing, crit: dict,
+                   allow_unknown_walk: bool = False) -> bool:
+    """Criteria that only reject a figure the portal actually published.
+
+    The walk time is the exception: it is computed here rather than published,
+    so "unknown" means the address did not resolve, and that fails — except for
+    `could_match`, which runs before the address has been fetched.
+    """
     max_walk = crit.get("max_walk_minutes")
     if max_walk is not None:
         if l.walk_minutes is None:
-            return False
-        limit = max_walk * ESTIMATE_TOLERANCE if l.walk_estimated else max_walk
-        if l.walk_minutes > limit:
-            return False
+            if not allow_unknown_walk:
+                return False
+        else:
+            limit = (max_walk * ESTIMATE_TOLERANCE if l.walk_estimated
+                     else max_walk)
+            if l.walk_minutes > limit:
+                return False
     # Agencies routinely withhold the rent ("prix sur demande"), and treating a
     # missing number as a failure would silently drop those flats.
     max_price = crit.get("max_price")

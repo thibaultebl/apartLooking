@@ -1,7 +1,11 @@
 name: scan
 
-# Scrapes every 30 minutes during waking hours and pushes an instant Telegram
-# alert for any new listing matching push_criteria in config.yaml.
+# Scrapes every 30 minutes during waking hours, resolves and stores what is new,
+# and sends nothing: the sole notification is the 19:00 digest in recap.yml.
+#
+# The cadence is not about latency any more, it is about coverage — comparis only
+# ever returns its newest 10 listings per request, so a slower scan silently
+# loses listings on a busy day.
 on:
   schedule:
     - cron: "*/30 5-21 * * *"   # UTC — roughly 07:00–23:00 CEST
@@ -31,10 +35,9 @@ jobs:
       - name: Restore state
         run: bash scripts/state.sh restore
 
+      # No Telegram credentials here on purpose: `scan` sends nothing, and a job
+      # that cannot reach Telegram cannot leak the token either.
       - name: Scan
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python -m watcher.main scan
 
       - name: Save state

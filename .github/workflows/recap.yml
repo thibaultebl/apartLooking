@@ -1,6 +1,8 @@
 name: recap
 
-# Sends the daily digest of everything new in the last 24 h, at 19:00 Swiss time.
+# Sends the daily digest at 19:00 Swiss time: the day's listings matching the
+# criteria in config.yaml, and nothing else. This is the only message the
+# watcher sends.
 #
 # GitHub crons are UTC and do not follow DST, so both candidate hours are
 # registered and the job itself decides which one is really 19:00 today — see

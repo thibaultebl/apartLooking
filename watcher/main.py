@@ -1,17 +1,18 @@
 """CLI entry point.
 
 Commands:
-    scan         scrape all sources, store new listings, push matches
-    recap        send the daily Telegram digest of the last 24 h
-    preview      print what would be sent, without sending (add hours, e.g. 24)
+    scan         scrape all sources and store new listings (sends nothing)
+    recap        send the daily Telegram digest of the day's matching listings
+    preview      print what would be sent, without sending (add hours, e.g. 26)
     backfill-dates    fetch publication dates for rows stored without one
     backfill-details  fetch postal code / floor for rows stored without them
     rematch      recompute is_match for stored rows after editing the criteria
     get-chat-id  print chat ids seen by the bot (setup helper)
-    test-alert   send a fake match alert to verify Telegram wiring
+    test-alert   send a one-listing digest to verify Telegram wiring
 """
 from __future__ import annotations
 
+import hashlib
 import html
 import importlib
 import logging
@@ -43,6 +44,8 @@ BACKFILL_INTERVAL = 0.4
 
 # When the daily digest goes out, in Swiss local time.
 RECAP_HOUR_LOCAL = 19
+# Window the digest covers when config.yaml says nothing.
+DEFAULT_WINDOW_HOURS = 26
 LOCAL_TZ = ZoneInfo("Europe/Zurich")
 
 
@@ -51,33 +54,30 @@ def load_config() -> dict:
         return yaml.safe_load(f)
 
 
-def _is_recent(listing, max_age_days: int) -> bool:
-    """Whether a listing is new enough to deserve an instant push.
-
-    Portals paginate non-deterministically, so "first time we saw it" is not
-    the same as "newly posted" — immobilier.ch alone re-shuffles roughly a
-    third of its results between runs. Where the portal publishes a date we
-    trust it; where it does not, the per-run alert cap is the backstop.
-    """
-    if listing.published is None:
-        return True
-    published = listing.published
-    if published.tzinfo is None:
-        published = published.replace(tzinfo=timezone.utc)
-    age = datetime.now(timezone.utc) - published
-    return age <= timedelta(days=max_age_days)
+def _criteria_hash(config: dict) -> str:
+    """Fingerprint of the search, so a scan can tell the criteria have changed."""
+    crit = sorted((k, repr(v)) for k, v in config.get("criteria", {}).items())
+    return hashlib.sha1(repr(crit).encode()).hexdigest()
 
 
 def scan() -> None:
     config = load_config()
     conn = db.connect()
+
+    # `is_match` is written once, at insert, so every stored row keeps the
+    # verdict of whatever criteria were in force that day. Editing config.yaml
+    # would otherwise leave the digest pinning listings that no longer match and
+    # hiding ones that now do, until someone remembered to run `rematch` by hand
+    # — and in CI nobody ever does, because the database lives on a branch.
+    current = _criteria_hash(config)
+    if db.get_meta(conn, "criteria_hash") != current:
+        log.info("Criteria changed since the last scan — re-applying them.")
+        rematch()
+        db.set_meta(conn, "criteria_hash", current)
+
     seed_mode = not db.is_seeded(conn)
     if seed_mode:
-        log.info("Not yet seeded: this pass stays silent (no notifications).")
-
-    alerting = config.get("alerting", {})
-    max_age_days = alerting.get("max_listing_age_days", 3)
-    max_alerts = alerting.get("max_alerts_per_source_run", 15)
+        log.info("Not yet seeded: no digest goes out until this pass completes.")
 
     failed: list[str] = []
     total_new = 0
@@ -97,40 +97,32 @@ def scan() -> None:
         # Scrapers stream their results so that everything fetched before an
         # interruption (job timeout, network drop) is already persisted.
         source_new = 0
-        alerts_sent = 0
-        suppressed = 0
+        matched = 0
         out_of_region = 0
         batch: list = []
 
         def flush() -> int:
-            """Resolve, persist and alert on one batch. Returns how many."""
-            nonlocal alerts_sent, suppressed
+            """Resolve, match and persist one batch. Returns how many."""
+            nonlocal matched
             if not batch:
                 return 0
             geo.resolve_walk_times(conn, batch, config)
             for listing in batch:
-                # Before the fingerprint is read: it is derived from zip_code,
-                # which enrichment is what supplies on some sources.
                 if enrich is not None and geo.could_match(listing, config):
                     try:
                         enrich(sess, listing)
                     except Exception as e:
                         log.warning("enrich failed for %s: %s", listing.uid, e)
-                cross_dupe = db.has_fingerprint(conn, listing.fingerprint)
+                    # Enrichment is what supplies the address on immobilier.ch,
+                    # so a listing that had no coordinates — and therefore no
+                    # walk time — may be routable now. Without this it would
+                    # fail the walk criterion for want of an address it has.
+                    if listing.walk_minutes is None:
+                        geo.resolve_coords(conn, listing)
+                        geo.resolve_walk_times(conn, [listing], config)
                 is_match = geo.matches_criteria(listing, config)
+                matched += is_match
                 db.insert(conn, listing, is_match)
-                if not (is_match and not seed_mode and not cross_dupe):
-                    continue
-                if not _is_recent(listing, max_age_days):
-                    continue           # old listing we simply had not indexed
-                if alerts_sent >= max_alerts:
-                    suppressed += 1    # backfill flood — bounded, see recap
-                    continue
-                try:
-                    notify.send_match_alert(listing, config)
-                    alerts_sent += 1
-                except Exception:
-                    log.exception("Match alert failed for %s", listing.uid)
             n = len(batch)
             batch.clear()
             return n
@@ -160,19 +152,16 @@ def scan() -> None:
         # market apart from a scraper that has silently stopped working.
         db.set_meta(conn, f"last_ok:{source}",
                     datetime.now(timezone.utc).isoformat())
-        if suppressed:
-            log.warning("%s: %d matching listings beyond the %d-alert cap were "
-                        "not pushed (they are still in the recap)",
-                        source, suppressed, max_alerts)
-        log.info("%s: %d new listings, %d alerts sent%s", source, source_new,
-                 alerts_sent,
+        log.info("%s: %d new listings, %d matching%s", source, source_new,
+                 matched,
                  f", {out_of_region} outside the region" if out_of_region else "")
 
-    # Reaching here means a full pass finished, so later runs may alert. A run
-    # killed mid-pass never gets here and stays in seed mode next time.
+    # Reaching here means a full pass finished, so the digest may start going
+    # out. A run killed mid-pass never gets here and stays in seed mode next
+    # time, so a partly-filled database cannot be mistaken for a day's news.
     if seed_mode:
         db.set_meta(conn, "seeded", "1")
-        log.info("Seed pass complete — future runs will send alerts.")
+        log.info("Seed pass complete — the digest starts from the next one.")
     log.info("Scan done: %d new listings. Failed sources: %s",
              total_new, failed or "none")
 
@@ -215,6 +204,27 @@ def _stale_sources(conn, config: dict, hours: int = 24) -> list[str]:
     return stale
 
 
+def _window_hours(config: dict) -> float:
+    return config.get("digest", {}).get("window_hours", DEFAULT_WINDOW_HOURS)
+
+
+def _digest_rows(conn, config: dict) -> list:
+    """The day's matching listings, cross-portal duplicates collapsed.
+
+    Shared by `recap` and `preview` so that what the preview prints is what the
+    digest sends, down to the ordering.
+    """
+    rows = db.matches_since(conn, _window_hours(config))
+    seen_fp: set[str] = set()
+    unique = []
+    for r in rows:
+        if r["fingerprint"] in seen_fp:
+            continue          # same flat, listed on a second portal
+        seen_fp.add(r["fingerprint"])
+        unique.append(r)
+    return unique
+
+
 def recap() -> None:
     if not _scheduled_for_now():
         log.info("Cron %r is not %02d:00 Europe/Zurich today — no digest.",
@@ -222,19 +232,18 @@ def recap() -> None:
         return
     config = load_config()
     conn = db.connect()
-    rows = db.new_since(conn, hours=24)
-    # collapse cross-portal duplicates: keep first occurrence per fingerprint
-    seen_fp: set[str] = set()
-    unique = []
-    for r in rows:
-        if r["fingerprint"] in seen_fp:
-            continue
-        seen_fp.add(r["fingerprint"])
-        unique.append(r)
+    # A database still being seeded holds an arbitrary slice of the market
+    # rather than a day's news, and the undated rows in it would all read as
+    # "seen today". Nothing goes out until one full pass has completed.
+    if not db.is_seeded(conn):
+        log.info("Database not seeded yet — no digest.")
+        return
+    rows = _digest_rows(conn, config)
     stale = _stale_sources(conn, config)
-    notify.send_recap(unique, failed_sources=stale, config=config)
-    log.info("Recap sent: %d listings (%d after dedup). Stale sources: %s",
-             len(rows), len(unique), stale or "none")
+    notify.send_digest(rows, failed_sources=stale, config=config,
+                       scanned=db.count_since(conn, _window_hours(config)))
+    log.info("Digest sent: %d matching listings over %g h. Stale sources: %s",
+             len(rows), _window_hours(config), stale or "none")
 
 
 def backfill_dates() -> None:
@@ -385,12 +394,19 @@ def rematch() -> None:
     verdict of whatever criteria were in force that day. After editing
     config.yaml — or after `backfill-details` supplies a missing postal code —
     the stored verdicts are stale and the digest pins the wrong listings.
+
+    Rows that pass every other criterion but have no walk time are geocoded and
+    routed here rather than being failed on the spot: a criterion cannot be
+    applied to a value that was never computed, and rejecting those rows would
+    quietly delete flats whose street simply did not geocode when they were
+    first stored. Only candidates are resolved — the same `could_match` gate
+    `backfill-details` uses — so this stays a handful of rows, not the table.
     """
     config = load_config()
     conn = db.connect()
     before = conn.execute("SELECT COUNT(*) FROM listings WHERE is_match = 1").fetchone()[0]
 
-    changed = 0
+    changed = resolved = 0
     for row in conn.execute("SELECT * FROM listings").fetchall():
         listing = Listing(
             source=row["source"], source_id=row["source_id"], url=row["url"],
@@ -401,6 +417,16 @@ def rematch() -> None:
             walk_minutes=row["walk_minutes"],
             walk_estimated=bool(row["walk_estimated"]),
         )
+        if listing.walk_minutes is None and geo.could_match(listing, config):
+            geo.resolve_coords(conn, listing)
+            geo.resolve_walk_times(conn, [listing], config)
+            if listing.walk_minutes is not None:
+                resolved += 1
+                conn.execute(
+                    """UPDATE listings SET lat = ?, lon = ?, walk_minutes = ?,
+                              walk_estimated = ? WHERE uid = ?""",
+                    (listing.lat, listing.lon, listing.walk_minutes,
+                     int(listing.walk_estimated), row["uid"]))
         is_match = int(geo.matches_criteria(listing, config))
         if is_match != row["is_match"]:
             conn.execute("UPDATE listings SET is_match = ? WHERE uid = ?",
@@ -408,34 +434,37 @@ def rematch() -> None:
             changed += 1
     conn.commit()
     after = conn.execute("SELECT COUNT(*) FROM listings WHERE is_match = 1").fetchone()[0]
-    log.info("Rematch: %d matching rows before, %d after (%d rows changed).",
-             before, after, changed)
+    log.info("Rematch: %d matching rows before, %d after (%d rows changed, "
+             "%d candidates newly geocoded).", before, after, changed, resolved)
 
 
 def preview() -> None:
     """Render what would be sent to Telegram, to the terminal. Sends nothing.
 
-    Usage: `python -m watcher.main preview [hours]` (default 24).
+    Usage: `python -m watcher.main preview [hours]` (default: the configured
+    digest window). Widen it — `preview 168` — to see a week when the day is
+    empty, which it usually is.
     """
-    hours = float(sys.argv[2]) if len(sys.argv) > 2 else 24.0
     conn = db.connect()
     config = load_config()
+    if len(sys.argv) > 2:
+        config.setdefault("digest", {})["window_hours"] = float(sys.argv[2])
+    hours = _window_hours(config)
 
     captured: list[tuple[bool, str]] = []
     original_send = notify.send
     notify.send = lambda text, silent=False: captured.append((silent, text))
     try:
-        rows = db.published_since(conn, hours)
-        notify.send_recap(rows, config=config)
-        for row in [r for r in rows if r["is_match"]][:3]:
-            notify.send_match_alert(row, config)
+        rows = _digest_rows(conn, config)
+        notify.send_digest(rows, failed_sources=_stale_sources(conn, config),
+                           config=config,
+                           scanned=db.count_since(conn, hours))
     finally:
         notify.send = original_send
 
-    print(f"\nListings published in the last {hours:g} h: {len(rows)}"
-          f" ({sum(1 for r in rows if r['is_match'])} matching)\n")
-    for i, (silent, text) in enumerate(captured):
-        kind = "DAILY RECAP (silent)" if i == 0 else "PUSH ALERT (buzzes phone)"
+    print(f"\nMatching listings published in the last {hours:g} h: {len(rows)}\n")
+    for silent, text in captured:
+        kind = "DAILY DIGEST (silent)" if silent else "DAILY DIGEST (buzzes phone)"
         print(f"┌─ {kind} " + "─" * max(0, 56 - len(kind)))
         for line in _to_terminal(text).split("\n"):
             print(f"│ {line}")
@@ -450,15 +479,20 @@ def _to_terminal(text: str) -> str:
 
 
 def test_alert() -> None:
+    """Send a one-listing digest, to verify the Telegram wiring.
+
+    Goes through `send_digest` rather than a bespoke message so that what this
+    proves is the path the daily digest actually takes.
+    """
     fake = Listing(
         source="test", source_id="0", url="https://example.com/annonce-test",
         title="TEST — Appartement 3.5 pièces, Av. de la Gare",
         price=2450, rooms=3.5, surface=82,
         address="Avenue de la Harpe 1", zip_code="1007", city="Lausanne",
-        floor=3, walk_minutes=12.0,
+        floor=3, walk_minutes=12.0, published=datetime.now(timezone.utc),
     )
-    notify.send_match_alert(fake, load_config())
-    print("Test alert sent.")
+    notify.send_digest([fake], config=load_config())
+    print("Test digest sent.")
 
 
 def main() -> None:
