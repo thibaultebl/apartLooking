@@ -16,8 +16,14 @@ MAX_LEN = 4096
 
 
 def _creds() -> tuple[str, str]:
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+    # Stripped, and the chat id tolerates the `chat_id=` prefix that
+    # `get-chat-id` prints: both are pasted through the GitHub secrets UI,
+    # which shows nothing back, and either mistake surfaces only as Telegram's
+    # unhelpful "chat not found" hours later.
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    if chat_id.startswith("chat_id="):
+        chat_id = chat_id[len("chat_id="):].strip()
     if not token or not chat_id:
         raise RuntimeError(
             "Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID environment variables."
