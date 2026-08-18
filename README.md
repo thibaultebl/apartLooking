@@ -2,7 +2,8 @@
 
 Scrapes Lausanne-region rental listings on a schedule and sends them to Telegram:
 
-- **instant loud push** for every new listing within **20 minutes' walk of Lausanne station**
+- **instant loud push** for every new listing matching the search — currently
+  **3.5 pces, in 1006 or 1007, 70–95 m², ≤ 2800 CHF, not on the ground floor**
 - **daily silent digest** of everything new in the last 24 h
 
 No LLM is involved at runtime — it is plain Python on a cron, so it costs nothing
@@ -13,7 +14,7 @@ per run and cannot drift or hallucinate.
 | Source | What it brings | How |
 |---|---|---|
 | `flatfox` | SMG network (~54 % of its listings carry an `smg_id`) | public JSON API, bbox pins + detail |
-| `immobilier_ch` | Romandie régies (Bernard Nicod, Marmillod, …) | HTML cards — ships `data-latlng`, no geocoding needed |
+| `immobilier_ch` | Romandie régies (Bernard Nicod, Marmillod, …) | HTML cards — ships `data-latlng`, no geocoding needed; NPA and floor need `enrich` |
 | `acheter_louer` | syndicates **Homegate** inventory | ld+json `ItemList` for ids, ld+json detail per listing |
 | `petitesannonces` | private landlords, absent from the portals | HTML table rows |
 
@@ -22,6 +23,13 @@ sit behind DataDome/Cloudflare walls that need a real browser on a residential
 IP — unreachable from a CI runner (verified: their web *and* mobile API endpoints
 all return 403). Homegate and ImmoScout24 inventory still reaches us indirectly
 through `acheter_louer` and `flatfox`; Anibis and newhome are an accepted gap.
+
+The four portals overlap heavily — `acheter_louer` ∩ `immobilier_ch` share 72 %
+of their addresses, `flatfox` ∩ `acheter_louer` 53 %. Measured by addresses that
+would be lost entirely if a source were dropped: immobilier.ch 35 %, flatfox
+18 %, acheter-louer 6 %, petitesannonces 2 %. petitesannonces is worth keeping
+despite that 2 %: private landlords are absent everywhere else, and it has
+produced a disproportionate share of actual matches.
 
 Adding a source = adding one file in `watcher/scrapers/` that exposes
 `fetch(seen: set[str]) -> Iterator[Listing]`, then listing its name in `config.yaml`.
@@ -36,8 +44,48 @@ pedestrian-profile OSRM server for the real walking duration to the station.
 > The main OSRM demo server only routes by car and silently returned car times —
 > this uses `routing.openstreetmap.de/routed-foot`, which has a real foot profile.
 
-Criteria live in `config.yaml`; `max_price` and `min_rooms` are already wired up
-and just need uncommenting.
+All criteria live in `config.yaml` under `push_criteria`, and the Telegram
+messages label themselves from it, so the two cannot drift apart. Two of them
+reject a listing whose value is simply *unknown* — `zip_codes` and `rooms`,
+which define the search rather than bound it. The rest only reject a figure the
+portal actually published, because "prix sur demande" is common and should not
+cost you a flat. `max_walk_minutes` is still implemented and just needs
+uncommenting.
+
+### Postal code and floor
+
+Neither is uniformly published, so both are pieced together per source:
+
+| Source | Postal code | Floor |
+|---|---|---|
+| `flatfox` | in the API response | `floor` field (`0` = rez), else parsed from the description |
+| `acheter_louer` | in the ld+json | `<td>Etage</td>` row, else the description — scoped to `div.content`, since the related-listing thumbnails on the same page advertise *other* flats' floors |
+| `immobilier_ch` | **absent from search cards** — fetched from the detail page by `enrich` | URL slug (~19 % of cards, free), else the detail page's `og:title` |
+| `petitesannonces` | in the search row | ad description, fetched by `enrich` |
+
+`enrich` costs one request per listing, so it runs **only for listings that
+already pass every other criterion** (`geo.could_match`) — in practice a
+handful per run, not one per listing. Floor parsing lives in `watcher/floors.py`;
+run `python -m watcher.floors` to check its regexes against real portal strings.
+
+Rows stored before a field was collected keep their gap, and `is_match` is
+written once at insert, so both go stale when the criteria change:
+
+```bash
+python -m watcher.main backfill-details   # fetch missing postal codes / floors
+python -m watcher.main rematch            # re-apply the criteria to every row
+```
+
+`backfill-details` visits **only rows that already pass every other criterion**,
+through the same `geo.could_match` gate a scan uses before spending a request —
+a few dozen rows rather than the couple of thousand with a gap, since the floor
+is never consulted for anything else. So **re-run both after widening the
+criteria**: rows that were not candidates before were never enriched, and cannot
+match until they are.
+
+Where the floor cannot be determined the listing **still pushes**, labelled
+`étage inconnu`: only a confirmed rez-de-chaussée is filtered out, since a
+missed flat costs more than one extra ping.
 
 ## Why "new to us" is not "newly posted"
 

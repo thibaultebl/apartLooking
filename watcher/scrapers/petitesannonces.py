@@ -8,6 +8,7 @@ from typing import Iterator
 
 from bs4 import BeautifulSoup
 
+from .. import floors
 from ..models import Listing
 from .base import REGION_ZIPS, get, session
 
@@ -78,6 +79,21 @@ def _parse_page(html: str) -> list[Listing]:
 def published_for(sess, listing):
     """Dates already arrive with the search rows; nothing extra to fetch."""
     return None
+
+
+def enrich(sess, listing) -> None:
+    """Read the floor out of the ad's free text, which the search rows omit.
+
+    Private landlords write no structured fields at all here, so the description
+    is the only place a floor can appear. Called for candidates only.
+    """
+    if listing.floor is not None:
+        return
+    html = get(sess, listing.url).text
+    soup = BeautifulSoup(html, "lxml")
+    for tag in soup(["script", "style"]):
+        tag.decompose()
+    listing.floor = floors.from_text(soup.get_text(" ", strip=True))
 
 
 def _parse_date(value: str):

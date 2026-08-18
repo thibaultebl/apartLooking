@@ -8,7 +8,7 @@ from typing import Optional
 
 import requests
 
-from . import db
+from . import db, floors
 from .models import Listing
 
 log = logging.getLogger(__name__)
@@ -262,7 +262,45 @@ ESTIMATE_TOLERANCE = 1.25
 
 
 def matches_criteria(l: Listing, config: dict) -> bool:
+    """Whether a listing earns a loud push. See config.yaml for the criteria."""
     crit = config.get("push_criteria", {})
+    if not _passes_bounds(l, crit):
+        return False
+    # Defining filters, not bounds: an unknown value is not allowed through.
+    # Callers must have run any enrichment before this point, or a listing gets
+    # rejected for a value the portal would have supplied on its detail page.
+    zip_codes = crit.get("zip_codes")
+    if zip_codes is not None and l.zip_code not in {str(z) for z in zip_codes}:
+        return False
+    if not _passes_rooms(l, crit):
+        return False
+    if crit.get("exclude_ground_floor") and floors.is_ground(l.floor):
+        return False
+    return True
+
+
+def could_match(l: Listing, config: dict) -> bool:
+    """Whether a listing is still a candidate once the unknowns are resolved.
+
+    Same criteria as `matches_criteria`, except that an unknown postal code or
+    floor passes instead of failing. This is the gate that decides whether a
+    listing is worth a detail-page fetch, so only genuine candidates cost a
+    request — everything ruled out on rooms, price or surface is already free.
+    """
+    crit = config.get("push_criteria", {})
+    if not _passes_bounds(l, crit) or not _passes_rooms(l, crit):
+        return False
+    zip_codes = crit.get("zip_codes")
+    if (zip_codes is not None and l.zip_code
+            and l.zip_code not in {str(z) for z in zip_codes}):
+        return False
+    if crit.get("exclude_ground_floor") and floors.is_ground(l.floor):
+        return False
+    return True
+
+
+def _passes_bounds(l: Listing, crit: dict) -> bool:
+    """Criteria that only reject a figure the portal actually published."""
     max_walk = crit.get("max_walk_minutes")
     if max_walk is not None:
         if l.walk_minutes is None:
@@ -270,9 +308,8 @@ def matches_criteria(l: Listing, config: dict) -> bool:
         limit = max_walk * ESTIMATE_TOLERANCE if l.walk_estimated else max_walk
         if l.walk_minutes > limit:
             return False
-    # Price/surface bounds only reject when the portal actually published the
-    # figure. Agencies routinely withhold the rent ("prix sur demande"), and
-    # treating a missing number as a failure would silently drop those flats.
+    # Agencies routinely withhold the rent ("prix sur demande"), and treating a
+    # missing number as a failure would silently drop those flats.
     max_price = crit.get("max_price")
     if max_price is not None and l.price is not None and l.price > max_price:
         return False
@@ -282,8 +319,19 @@ def matches_criteria(l: Listing, config: dict) -> bool:
     min_surface = crit.get("min_surface")
     if min_surface is not None and l.surface is not None and l.surface < min_surface:
         return False
-    # Room count is different: it is the filter that separates flats from
-    # single rooms, so an unknown count is not allowed to pass.
+    max_surface = crit.get("max_surface")
+    if max_surface is not None and l.surface is not None and l.surface > max_surface:
+        return False
+    return True
+
+
+def _passes_rooms(l: Listing, crit: dict) -> bool:
+    """Room count, which separates flats from single rooms — unknown fails."""
+    rooms = crit.get("rooms")
+    if rooms is not None and (l.rooms is None
+                              or not any(abs(l.rooms - float(r)) < 1e-6
+                                         for r in rooms)):
+        return False
     min_rooms = crit.get("min_rooms")
     if min_rooms is not None and (l.rooms is None or l.rooms < min_rooms):
         return False

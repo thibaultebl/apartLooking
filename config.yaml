@@ -7,28 +7,38 @@ station:
 
 # Criteria that trigger an immediate (loud) Telegram push.
 # All listed criteria must match.
+#
+# Two of these reject a listing whose value is simply unknown, because they are
+# what defines the search rather than a bound on it: zip_codes and rooms. The
+# rest only reject a figure the portal actually published — agencies routinely
+# withhold the rent ("prix sur demande"), and treating that as a failure would
+# silently drop those flats.
 push_criteria:
-  max_walk_minutes: 20
+  # Sous-Gare / Ouchy / Montriond. immobilier.ch publishes no NPA on its search
+  # cards, so its listings get one fetched from the detail page before this is
+  # applied — see scrapers/immobilier_ch.py:enrich.
+  zip_codes: ["1006", "1007"]
 
-  # Swiss "pièces" counts the living room, so 2 pces ≈ 1 bedroom. This is the
-  # filter that does the real work: it removes every chambre and studio (7-15 m²
-  # rooms in shared flats), which is 156 of 572 matches, and nothing else.
-  min_rooms: 2
+  # Swiss "pièces" counts the living room, so 3.5 pces ≈ 2 bedrooms.
+  rooms: [3.5]
 
-  # Deliberately NOT set — measured against real data, both do more harm than good:
-  #
-  #   min_price: a floor at 1000-1200 discards only 3-4 listings, and the very
-  #     first ones it takes are the best deals on the market (973 CHF for
-  #     4.5 pces/100 m², 990 CHF for 3.5 pces/100 m²). Cheap does not mean nasty
-  #     here; nasty was the 1-room listings, already gone via min_rooms.
-  #   min_surface: the smallest genuine 2 pces is 35 m². Everything below that is
-  #     a broken surface field on an otherwise good flat (a 3 pces at 3900 CHF
-  #     listed as "1 m²"), so a floor would reject real flats over bad data.
-  #
-  # Both are implemented and ready if you want them:
-  # min_price: 1000
-  # min_surface: 35
-  # max_price: 2500     # a ceiling is the useful one if budget is the constraint
+  # "Around 80 m²", kept wide on purpose: portals round, and the same flat is
+  # listed at 76 and at 93 by two different agencies.
+  min_surface: 70
+  max_surface: 95
+
+  max_price: 2800
+
+  # Only rejects a *confirmed* rez-de-chaussée. The floor is unknown for a
+  # minority of listings; those still push, flagged "étage inconnu", because a
+  # missed flat costs more than one extra ping.
+  exclude_ground_floor: true
+
+  # Dropped: the zip codes now define the area, and a walk bound only cut into
+  # 1007 (Malley/Bourdonnette) without excluding anything unwanted. Still
+  # implemented, still computed, still shown in the message — uncomment to
+  # bring it back as a filter.
+  # max_walk_minutes: 20
 
 alerting:
   # Portals publish a date for most listings; anything older than this was

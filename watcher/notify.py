@@ -7,6 +7,8 @@ import os
 
 import requests
 
+from . import floors
+
 log = logging.getLogger(__name__)
 
 API = "https://api.telegram.org/bot{token}/{method}"
@@ -78,6 +80,10 @@ def _fmt_listing(row, link: bool = True) -> str:
         parts.append(f"{rooms:g} {'pce' if rooms <= 1 else 'pces'}")
     if get("surface"):
         parts.append(f"{get('surface')} m²")
+    # Always shown, including when unknown: "étage inconnu" is the cue to open
+    # the ad and check, since a ground floor is only filtered out when the
+    # portal actually said so.
+    parts.append(floors.describe(_get(row, "floor")))
     if get("walk_minutes") is not None:
         approx = "~" if _get(row, "walk_estimated") else ""
         parts.append(f"🚶 {approx}{get('walk_minutes'):.0f} min")
@@ -88,10 +94,34 @@ def _fmt_listing(row, link: bool = True) -> str:
     return f"• {line}\n   {detail}" if detail else f"• {line}"
 
 
-def send_match_alert(listing) -> None:
+def criteria_label(config: dict | None) -> str:
+    """One-line summary of the push criteria, for the message headers.
+
+    Built from the config rather than written out, because the previous
+    hardcoded "moins de 20 min de la gare" outlived the criterion it described.
+    """
+    crit = (config or {}).get("push_criteria", {})
+    parts = []
+    if crit.get("rooms"):
+        parts.append(" / ".join(f"{float(r):g}" for r in crit["rooms"]) + " pces")
+    if crit.get("zip_codes"):
+        parts.append(" ou ".join(str(z) for z in crit["zip_codes"]))
+    if crit.get("min_surface") or crit.get("max_surface"):
+        lo, hi = crit.get("min_surface"), crit.get("max_surface")
+        parts.append(f"{lo}-{hi} m²" if lo and hi else f"{lo or hi} m²")
+    if crit.get("max_price"):
+        parts.append(f"≤ {crit['max_price']} CHF")
+    if crit.get("exclude_ground_floor"):
+        parts.append("sans rez")
+    if crit.get("max_walk_minutes"):
+        parts.append(f"≤ {crit['max_walk_minutes']} min à pied")
+    return " · ".join(parts) or "critères de recherche"
+
+
+def send_match_alert(listing, config: dict | None = None) -> None:
     """Loud push for a listing matching the criteria."""
     text = (
-        "🚨🚨 <b>MATCH — nouvelle annonce à moins de 20 min de la gare !</b> 🚨🚨\n\n"
+        f"🚨🚨 <b>MATCH — {html.escape(criteria_label(config))}</b> 🚨🚨\n\n"
         + _fmt_listing(listing)
     )
     send(text, silent=False)
@@ -111,7 +141,8 @@ def _section(title: str, items: list, limit: int) -> str:
     return f"{title}\n" + "\n".join(lines)
 
 
-def send_recap(rows, failed_sources: list[str] | None = None) -> None:
+def send_recap(rows, failed_sources: list[str] | None = None,
+               config: dict | None = None) -> None:
     """Daily digest of all new listings; matches pinned on top, silent send."""
     if not rows:
         body = "Aucune nouvelle annonce ces dernières 24 h."
@@ -121,7 +152,8 @@ def send_recap(rows, failed_sources: list[str] | None = None) -> None:
         sections = []
         if matches:
             sections.append(_section(
-                f"🚨 <b>Matches (≤ 20 min à pied de la gare)</b> — {len(matches)}",
+                f"🚨 <b>Matches ({html.escape(criteria_label(config))})</b>"
+                f" — {len(matches)}",
                 matches, MAX_MATCHES))
         if others:
             by_source: dict[str, list] = {}

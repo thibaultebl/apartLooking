@@ -23,6 +23,7 @@ class Listing:
     city: str = ""
     lat: Optional[float] = None
     lon: Optional[float] = None
+    floor: Optional[int] = None         # 0 = rez-de-chaussée, see floors.py
     walk_minutes: Optional[float] = None  # filled by geo pipeline
     walk_estimated: bool = False          # True when no router could be reached
     published: Optional[datetime] = None  # portal's publication date, when given

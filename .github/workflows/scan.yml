@@ -1,7 +1,7 @@
 name: scan
 
 # Scrapes every 30 minutes during waking hours and pushes an instant Telegram
-# alert for any new listing within 20 minutes' walk of Lausanne station.
+# alert for any new listing matching push_criteria in config.yaml.
 on:
   schedule:
     - cron: "*/30 5-21 * * *"   # UTC — roughly 07:00–23:00 CEST

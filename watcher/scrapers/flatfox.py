@@ -5,6 +5,7 @@ import logging
 from datetime import datetime
 from typing import Iterator
 
+from .. import floors
 from ..models import Listing
 from .base import get, session
 
@@ -78,8 +79,35 @@ def fetch(seen: set[str] = frozenset()) -> Iterator[Listing]:
             city=d.get("city") or "",
             lat=d.get("latitude"),
             lon=d.get("longitude"),
+            floor=_floor(d),
             published=_parse_dt(d.get("published") or d.get("created")),
         )
+
+
+def _floor(d: dict) -> "int | None":
+    """Floor from the structured field, falling back to the listing text.
+
+    The field is the truth when present — one sampled listing carries floor=4
+    while its description mentions a "1er étage" elsewhere in the building — but
+    it is null for roughly a quarter of listings, and the description names the
+    floor for most of those.
+    """
+    if d.get("floor") is not None:
+        return d["floor"]
+    return floors.from_text(f"{d.get('public_title') or ''} "
+                            f"{d.get('description') or ''}")
+
+
+def enrich(sess, listing) -> None:
+    """Fill the floor on rows stored before it was collected.
+
+    `fetch` already sets the floor from the same endpoint, so during a scan this
+    is a no-op and costs nothing; it exists for `backfill-details`.
+    """
+    if listing.floor is not None:
+        return
+    d = get(sess, f"{BASE}/api/v1/public-listing/{listing.source_id}/").json()
+    listing.floor = _floor(d)
 
 
 def published_for(sess, listing):

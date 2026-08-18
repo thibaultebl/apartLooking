@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS listings (
     city         TEXT,
     lat          REAL,
     lon          REAL,
+    floor        INTEGER,            -- 0 = rez-de-chaussée; NULL = unknown
     walk_minutes REAL,
     walk_estimated INTEGER DEFAULT 0,
     published    TEXT,
@@ -66,7 +67,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     """Add columns introduced after a database was first created."""
     existing = {r["name"] for r in conn.execute("PRAGMA table_info(listings)")}
     for column, ddl in (("walk_estimated", "INTEGER DEFAULT 0"),
-                        ("published", "TEXT")):
+                        ("published", "TEXT"),
+                        ("floor", "INTEGER")):
         if column not in existing:
             conn.execute(f"ALTER TABLE listings ADD COLUMN {column} {ddl}")
     conn.commit()
@@ -108,11 +110,11 @@ def insert(conn: sqlite3.Connection, l: Listing, is_match: bool) -> None:
     conn.execute(
         """INSERT OR IGNORE INTO listings
            (uid, source, source_id, url, title, price, rooms, surface,
-            address, zip_code, city, lat, lon, walk_minutes, walk_estimated,
-            published, fingerprint, is_match, first_seen)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            address, zip_code, city, lat, lon, floor, walk_minutes,
+            walk_estimated, published, fingerprint, is_match, first_seen)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (l.uid, l.source, l.source_id, l.url, l.title, l.price, l.rooms,
-         l.surface, l.address, l.zip_code, l.city, l.lat, l.lon,
+         l.surface, l.address, l.zip_code, l.city, l.lat, l.lon, l.floor,
          l.walk_minutes, int(l.walk_estimated),
          l.published.isoformat() if l.published else None,
          l.fingerprint, int(is_match),
