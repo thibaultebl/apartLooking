@@ -69,7 +69,11 @@ sources:
   - immobilier_ch    # Romandie régies; ships lat/lng in the markup
   - acheter_louer    # syndicates Homegate inventory
   - petitesannonces  # private landlords, not on the portals
-  - comparis         # aggregator; the only source that states the floor outright
+  # - comparis       # DISABLED 2026-08-19: works from a residential IP but its
+  #                  # WAF has answered 403 to the GitHub runner on every single
+  #                  # run since it was added, so in CI it has never returned a
+  #                  # listing. Left in place because the code works — uncomment
+  #                  # if scans ever run from somewhere it will talk to.
 
 # Deliberately NOT scraped — all sit behind DataDome/Cloudflare bot walls that
 # need a real browser on a residential IP, which a CI runner is not (re-verified

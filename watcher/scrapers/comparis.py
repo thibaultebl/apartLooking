@@ -54,16 +54,19 @@ NON_RESIDENTIAL = re.compile(
 
 def fetch(seen: set[str] = frozenset()) -> Iterator[Listing]:
     sess = session()
-    try:
-        html = get(sess, RESULTS_URL).text
-    except Exception as e:
-        log.warning("comparis results page failed: %s", e)
-        return
+    # Deliberately not caught. This source makes exactly one request, so a
+    # failure here is not a partial result — it is the whole source down, and
+    # `scan` marks a source that raises as failed so the daily digest lists it
+    # under "Sources en erreur". Swallowing it stamped comparis healthy on every
+    # run while its WAF was answering 403 to everything.
+    html = get(sess, RESULTS_URL).text
 
     items = _result_items(html)
     if not items:
-        log.warning("comparis: no listings in the payload — markup may have changed")
-        return
+        # Lausanne has ~2500 active listings; an empty payload means the markup
+        # changed, not that the market emptied.
+        raise RuntimeError("no listings in the comparis payload — "
+                           "markup may have changed")
     log.info("comparis: %d listings in the newest-first page", len(items))
 
     skipped: list[str] = []

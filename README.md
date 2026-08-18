@@ -30,14 +30,22 @@ per run and cannot drift or hallucinate.
 | `immobilier_ch` | Romandie régies (Bernard Nicod, Marmillod, …) | HTML cards — ships `data-latlng`, no geocoding needed; NPA and floor need `enrich` |
 | `acheter_louer` | syndicates **Homegate** inventory | ld+json `ItemList` for ids, ld+json detail per listing |
 | `petitesannonces` | private landlords, absent from the portals | HTML table rows |
-| `comparis` | aggregator over Homegate/ImmoScout24; **states the floor outright** | Next.js payload on the results page — one request, newest 10 only |
+| ~~`comparis`~~ | aggregator over Homegate/ImmoScout24; states the floor outright | **disabled** — 403 from the CI runner on every run since it was added |
 
 **Not scraped, deliberately.** `homegate`, `immoscout24`, `anibis`/`tutti` and
 `newhome` sit behind DataDome/Cloudflare walls that need a real browser on a
 residential IP — unreachable from a CI runner (re-verified 2026-08-18: all still
 403). Homegate and ImmoScout24 inventory still reaches us indirectly through
-`acheter_louer`, `flatfox` and `comparis`; Anibis/tutti and newhome are an
-accepted gap.
+`acheter_louer` and `flatfox`; Anibis/tutti and newhome are an accepted gap.
+
+**`comparis` joined them on 2026-08-19.** It works from a residential IP and its
+code is unchanged, but its WAF has answered 403 to the GitHub runner on every run
+since the source was added — it has never returned a listing in production. It is
+commented out in `config.yaml` rather than deleted; uncomment it to bring it back.
+Until 2026-08-19 that failure was invisible: the scraper caught its own 403 and
+returned nothing, so the source stamped itself healthy. A source that cannot make
+its one request now raises, which is what puts it in the digest'"'"'s
+`⚠️ Sources en erreur` line.
 
 **`comparis` is capped at one request per run**, and that is a property of the
 site, not a choice. Its WAF refuses `?page=N`, every other query parameter, the
